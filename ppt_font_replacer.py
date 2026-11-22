@@ -4,10 +4,9 @@ PPT 字体统一替换工具
 - 遍历所有幻灯片 / 母版 / 版式 / 备注页的全部文本
 - 同时设置 Latin / 东亚(EA) / 复杂文种(CS) 三种字体，确保中文字体生效
 - 只处理真实文本（文本框、占位符、表格、图表文字），图片内嵌文字不受影响
+- 字体来源：选择一个字体文件夹，读取其中全部字体文件（须为同一套字体）
 """
 import os
-import shutil
-import sys
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
@@ -19,8 +18,8 @@ FONT_EXTENSIONS = ('.ttf', '.otf', '.ttc')
 
 # ---------------- 字体名解析 ----------------
 
-def get_font_name(font_path):
-    """用 fontTools 读取字体内部的真实字体名（family + subfamily）。"""
+def get_font_family(font_path):
+    """用 fontTools 读取字体内部的家族名（family name）。"""
     try:
         from fontTools.ttLib import TTFont, TTCollection
         ext = os.path.splitext(font_path)[1].lower()
@@ -30,29 +29,43 @@ def get_font_name(font_path):
         else:
             font = TTFont(font_path, fontNumber=0, lazy=True)
         name_table = font['name']
-        # nameID 16 = Typographic Family, 1 = Family; 2 = Subfamily
+        # nameID 16 = Typographic Family, 1 = Family
         family = name_table.getDebugName(16) or name_table.getDebugName(1) or ''
-        subfamily = name_table.getDebugName(17) or name_table.getDebugName(2) or ''
         font.close()
-        family = family.strip()
-        subfamily = subfamily.lower()
-        if not family:
-            return None
-        # 粗斜体等特殊样式在 family 中体现时直接用 family
-        if any(k in subfamily for k in ('bold', 'italic', 'black', 'heavy',
-                                        'medium', 'light', 'regular')):
-            # 若 family 本身已含样式词（如 Unity-Bold），直接用
-            if any(k in family.lower() for k in ('bold', 'italic', 'black',
-                                                 'heavy', 'medium', 'light')):
-                return family
-        return family
+        return family.strip() or None
     except Exception:
         return None
 
 
-def font_name_from_filename(font_path):
-    """降级方案：用文件名推断字体名（去掉扩展名）。"""
-    return os.path.splitext(os.path.basename(font_path))[0]
+def scan_font_folder(folder):
+    """
+    扫描字体文件夹，返回 (font_name, file_count, error)。
+    - 找出文件夹下全部字体文件，解析其家族名
+    - 所有字体必须属于同一家族（Regular/Bold/Italic 等字重视为一套）
+    - 出现多个不同家族时报错
+    """
+    files = [f for f in sorted(os.listdir(folder))
+             if f.lower().endswith(FONT_EXTENSIONS)]
+    if not files:
+        return None, 0, '该文件夹下没有找到字体文件（.ttf / .otf / .ttc）'
+
+    families = {}
+    for f in files:
+        fam = get_font_family(os.path.join(folder, f)) \
+            or os.path.splitext(f)[0]
+        families.setdefault(fam, []).append(f)
+
+    if len(families) > 1:
+        names = '、'.join(sorted(families.keys()))
+        detail = '\n'.join(
+            f'  {fam}：{len(fs)} 个文件' for fam, fs in sorted(families.items()))
+        return None, len(files), (
+            f'检测到多套不同字体：{names}\n\n{detail}\n\n'
+            '请简化字体文件夹，只保留一套字体（该套字体的 '
+            'Regular / Bold / Italic 等字重可以都保留），然后重新开始。')
+
+    font_name = next(iter(families.keys()))
+    return font_name, len(files), None
 
 
 # ---------------- 字体替换核心 ----------------
@@ -95,14 +108,10 @@ def walk_shapes(shapes, font_name, stats):
             for row in shape.table.rows:
                 for cell in row.cells:
                     replace_in_text_frame(cell.text_frame, font_name, stats)
-        # 图表
+        # 图表标题
         if getattr(shape, 'has_chart', False) and shape.has_chart:
             chart = shape.chart
             try:
-                for plot in chart.plots:
-                    for series in plot.series:
-                        # 图表字体替换较复杂，这里替换图表标题/坐标轴文字
-                        pass
                 if chart.has_title:
                     replace_in_text_frame(chart.chart_title.text_frame, font_name, stats)
             except Exception:
@@ -138,37 +147,15 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title('PPT 字体统一替换工具')
-        self.geometry('640x460')
+        self.geometry('640x440')
         self.resizable(False, False)
 
         self.ppt_path = tk.StringVar()
-        self.font_path = tk.StringVar()
-        self.font_name = tk.StringVar(value='（未选择字体）')
-        self.builtin_dir = self._builtin_font_dir()
+        self.font_dir = tk.StringVar()
+        self.font_info = tk.StringVar(value='（未选择字体文件夹）')
+        self._resolved_font_name = None
 
         self._build_ui()
-        self._load_builtin_font()
-
-    def _builtin_font_dir(self):
-        """exe 同目录下的 fonts 文件夹（把一套字体放进去即可自动加载）。"""
-        if getattr(sys, 'frozen', False):
-            base = os.path.dirname(sys.executable)
-        else:
-            base = os.path.dirname(os.path.abspath(__file__))
-        return os.path.join(base, 'fonts')
-
-    def _load_builtin_font(self):
-        if not os.path.isdir(self.builtin_dir):
-            return
-        fonts = [f for f in os.listdir(self.builtin_dir)
-                 if f.lower().endswith(FONT_EXTENSIONS)]
-        if len(fonts) == 1:
-            self._set_font(os.path.join(self.builtin_dir, fonts[0]))
-        elif fonts:
-            # 多套字体时优先找 Regular
-            reg = [f for f in fonts if 'regular' in f.lower()]
-            pick = reg[0] if reg else fonts[0]
-            self._set_font(os.path.join(self.builtin_dir, pick))
 
     def _build_ui(self):
         pad = {'padx': 12, 'pady': 6}
@@ -183,18 +170,14 @@ class App(tk.Tk):
 
         ttk.Separator(frm).pack(fill='x', pady=8)
 
-        ttk.Label(frm, text='第二步：选择字体文件 (.ttf / .otf / .ttc)').pack(anchor='w', **pad)
+        ttk.Label(frm, text='第二步：选择字体文件夹（放入一套字体的全部字重）').pack(anchor='w', **pad)
         row2 = ttk.Frame(frm)
         row2.pack(fill='x', **pad)
-        ttk.Entry(row2, textvariable=self.font_path, width=55).pack(side='left')
-        ttk.Button(row2, text='浏览…', command=self._pick_font).pack(side='left', padx=6)
+        ttk.Entry(row2, textvariable=self.font_dir, width=55).pack(side='left')
+        ttk.Button(row2, text='浏览…', command=self._pick_font_dir).pack(side='left', padx=6)
 
-        ttk.Label(frm, textvariable=self.font_name,
-                  foreground='#555').pack(anchor='w', padx=12)
-
-        ttk.Label(frm,
-                  text=f'提示：把整套字体放进程序同目录 fonts 文件夹可自动加载。\n当前内置目录：{self.builtin_dir}',
-                  foreground='#999').pack(anchor='w', padx=12, pady=6)
+        ttk.Label(frm, textvariable=self.font_info,
+                  foreground='#555', wraplength=580).pack(anchor='w', padx=12)
 
         ttk.Separator(frm).pack(fill='x', pady=8)
 
@@ -219,34 +202,41 @@ class App(tk.Tk):
         if path:
             self.ppt_path.set(path)
 
-    def _pick_font(self):
-        path = filedialog.askopenfilename(
-            title='选择字体文件',
-            filetypes=[('字体文件', '*.ttf *.otf *.ttc')])
-        if path:
-            self._set_font(path)
-
-    def _set_font(self, path):
-        self.font_path.set(path)
-        name = get_font_name(path) or font_name_from_filename(path)
-        self.font_name.set(f'识别到字体名：{name}')
-        self._resolved_font_name = name
+    def _pick_font_dir(self):
+        folder = filedialog.askdirectory(title='选择字体文件夹（一套字体）')
+        if not folder:
+            return
+        font_name, count, err = scan_font_folder(folder)
+        if err:
+            self.font_dir.set('')
+            self._resolved_font_name = None
+            self.font_info.set('（未选择字体文件夹）')
+            messagebox.showwarning('字体文件夹有问题', err)
+            return
+        self.font_dir.set(folder)
+        self._resolved_font_name = font_name
+        self.font_info.set(
+            f'识别到字体：{font_name}（共 {count} 个字体文件，视为一套字体）')
 
     def _run(self):
         ppt = self.ppt_path.get().strip()
-        font = self.font_path.get().strip()
+        font_dir = self.font_dir.get().strip()
         if not ppt or not os.path.isfile(ppt):
             messagebox.showwarning('提示', '请先选择 PPT 文件')
             return
-        if not font or not os.path.isfile(font):
-            messagebox.showwarning('提示', '请先选择字体文件')
+        if not font_dir or not os.path.isdir(font_dir):
+            messagebox.showwarning('提示', '请先选择字体文件夹')
             return
         if os.path.splitext(ppt)[1].lower() != '.pptx':
             messagebox.showwarning('提示', '只支持 .pptx 格式（请先另存为 .pptx）')
             return
 
-        font_name = getattr(self, '_resolved_font_name', None) \
-            or get_font_name(font) or font_name_from_filename(font)
+        font_name = self._resolved_font_name
+        if not font_name:
+            font_name, _, err = scan_font_folder(font_dir)
+            if err:
+                messagebox.showwarning('字体文件夹有问题', err)
+                return
 
         out_dir = os.path.dirname(ppt)
         base = os.path.splitext(os.path.basename(ppt))[0]
