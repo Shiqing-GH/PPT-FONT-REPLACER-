@@ -24,17 +24,11 @@ jobs:
         run: |
           python -m PyInstaller --noconfirm --clean --onefile --windowed --name "PPTFontReplacer" ppt_font_replacer.py
 
-      - name: Prepare fonts folder
-        run: |
-          New-Item -ItemType Directory -Force -Path "dist\fonts"
-
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: PPTFontReplacer-exe
-          path: |
-            dist/PPTFontReplacer.exe
-            dist/fonts/
+          path: dist/PPTFontReplacer.exe
 
       - name: Create Release (only on version tags)
         if: startsWith(github.ref, 'refs/tags/v')
